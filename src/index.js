@@ -156,26 +156,81 @@ app.post('/api/upload', upload.single('file'), async (req, res) => {
   }
 });
 
-// Helper function to extract critical issues
+// Get report endpoint
+app.get('/api/report/:scanId', async (req, res) => {
+  try {
+    const { scanId } = req.params;
+
+    // Create parameters
+    const params = new URLSearchParams();
+    params.append('hash', scanId);
+
+    const reportResponse = await axios.post(
+      `${mobsfConfig.baseURL}/api/v1/report_json`,
+      params,
+      {
+        headers: {
+          'Authorization': mobsfConfig.apiKey,
+          'Content-Type': 'application/x-www-form-urlencoded'
+        }
+      }
+    );
+
+    const report = reportResponse.data;
+
+    // Extract critical issues and hotspots
+    const findings = {
+      criticalIssues: extractCriticalIssues(report),
+      hotspots: extractSecurityHotspots(report),
+      malwareFindings: report.virus_total || {},
+      appInfo: {
+        package_name: report.package_name || 'N/A',
+        main_activity: report.main_activity || report.activities?.[0]?.name || 'N/A',
+        target_sdk: report.target_sdk || 'N/A',
+        min_sdk: report.min_sdk || 'N/A',
+        version_name: report.version_name || 'N/A',
+        version_code: report.version_code || 'N/A',
+        file_name: report.file_name || 'N/A',
+        file_size: report.file_size || 'N/A',
+        md5: report.md5 || 'N/A',
+        sha256: report.sha256 || 'N/A'
+      }
+    };
+
+    // Add summary
+    findings.summary = {
+      totalCriticalIssues: findings.criticalIssues.length,
+      totalDangerousPermissions: findings.hotspots.permissions.count.dangerous,
+      totalCriticalPermissions: findings.hotspots.permissions.count.critical,
+      totalExposedComponents: findings.hotspots.exposedComponents.length,
+      totalNetworkIssues: findings.hotspots.networkSecurity.length,
+      totalCertificateIssues: findings.hotspots.certificates.length,
+      totalFileIssues: findings.hotspots.files.length
+    };
+
+    res.json(findings);
+
+  } catch (error) {
+    console.error('Report error:', error.message);
+    if (error.response) {
+      console.error('Error response:', {
+        status: error.response.status,
+        data: error.response.data,
+        headers: error.response.headers
+      });
+    }
+    
+    res.status(500).json({ 
+      error: 'Error fetching report from MobSF',
+      details: error.response?.data || error.message
+    });
+  }
+});
+
+// Helper function to extract critical security issues
 function extractCriticalIssues(report) {
   const criticalIssues = [];
   
-  // Add permission hotspots
-  if (report.permissions?.dangerous?.length > 0) {
-    criticalIssues.push({
-      category: 'permissions',
-      title: `Found ${report.permissions.dangerous.length} critical permission(s)`,
-      description: formatPermissionsDescription(report.permissions.dangerous),
-      severity: 'high',
-      permissions: report.permissions.dangerous.map(perm => ({
-        name: perm.name || perm,
-        status: perm.status || 'dangerous',
-        description: perm.description || '',
-        info: perm.info || ''
-      }))
-    });
-  }
-
   // Categories to check for critical issues
   const categories = [
     'android_apis',
@@ -189,6 +244,7 @@ function extractCriticalIssues(report) {
   categories.forEach(category => {
     if (report[category]) {
       Object.entries(report[category]).forEach(([key, finding]) => {
+        // Include high severity issues and those with high CVSS scores
         if (finding.severity === 'high' || (finding.cvss && finding.cvss >= 7.0)) {
           criticalIssues.push({
             category,
@@ -208,68 +264,6 @@ function extractCriticalIssues(report) {
   });
 
   return criticalIssues;
-}
-
-// Helper function to format permissions description
-function formatPermissionsDescription(permissions) {
-  const descriptions = permissions.map(perm => {
-    const permName = typeof perm === 'string' ? perm : perm.name;
-    const permDesc = typeof perm === 'string' ? '' : perm.description || '';
-    const permInfo = typeof perm === 'string' ? '' : perm.info || '';
-    
-    return `${permName} (dangerous): ${permDesc}${permInfo ? ` - ${permInfo}` : ''}`;
-  });
-
-  return `Ensure that these permissions are required by the application.\n\n${descriptions.join('\n\n')}`;
-}
-
-// Helper function to extract security hotspots
-function extractSecurityHotspots(report) {
-  return {
-    // Dangerous permissions that could be exploited
-    permissions: {
-      dangerous: formatPermissionsList(report.permissions?.dangerous),
-      critical: formatPermissionsList(report.permissions?.critical),
-      count: {
-        dangerous: report.permissions?.dangerous?.length || 0,
-        critical: report.permissions?.critical?.length || 0
-      }
-    },
-    
-    // Exposed components that might be vulnerable
-    exposedComponents: extractExposedComponents(report),
-    
-    // Network security configuration issues
-    networkSecurity: extractNetworkSecurityIssues(report),
-    
-    // Certificate issues
-    certificates: extractCertificateIssues(report),
-    
-    // File-based vulnerabilities
-    files: extractFileBasedIssues(report)
-  };
-}
-
-// Helper function to format permissions list
-function formatPermissionsList(permissions) {
-  if (!permissions) return [];
-  
-  return permissions.map(perm => {
-    if (typeof perm === 'string') {
-      return {
-        name: perm,
-        status: 'dangerous',
-        description: '',
-        info: ''
-      };
-    }
-    return {
-      name: perm.name,
-      status: perm.status || 'dangerous',
-      description: perm.description || '',
-      info: perm.info || ''
-    };
-  });
 }
 
 // Helper function to extract exposed components
@@ -369,71 +363,34 @@ function extractFileBasedIssues(report) {
   return fileIssues;
 }
 
-// Get report endpoint
-app.get('/api/report/:scanId', async (req, res) => {
-  try {
-    const { scanId } = req.params;
-
-    // Create parameters
-    const params = new URLSearchParams();
-    params.append('hash', scanId);
-
-    const reportResponse = await axios.post(
-      `${mobsfConfig.baseURL}/api/v1/report_json`,
-      params,
-      {
-        headers: {
-          'Authorization': mobsfConfig.apiKey,
-          'Content-Type': 'application/x-www-form-urlencoded'
-        }
+// Helper function to extract security hotspots
+function extractSecurityHotspots(report) {
+  return {
+    permissions: {
+      dangerous: report.permissions?.dangerous_permissions || [],
+      critical: report.permissions?.critical_permissions || [],
+      normal: report.permissions?.regular_permissions || [],
+      count: {
+        dangerous: report.permissions?.dangerous_permissions?.length || 0,
+        critical: report.permissions?.critical_permissions?.length || 0,
+        normal: report.permissions?.regular_permissions?.length || 0
       }
-    );
-
-    const report = reportResponse.data;
-
-    // Extract critical issues and hotspots
-    const findings = {
-      criticalIssues: extractCriticalIssues(report),
-      hotspots: extractSecurityHotspots(report),
-      malwareFindings: report.virus_total || {},
-      appInfo: {
-        appName: report.app_name,
-        packageName: report.package_name,
-        version: report.version_name,
-        sha256: report.sha256,
-        md5: report.md5
-      }
-    };
-
-    // Add summary
-    findings.summary = {
-      totalCriticalIssues: findings.criticalIssues.length,
-      totalDangerousPermissions: findings.hotspots.permissions.count.dangerous,
-      totalCriticalPermissions: findings.hotspots.permissions.count.critical,
-      totalExposedComponents: findings.hotspots.exposedComponents.length,
-      totalNetworkIssues: findings.hotspots.networkSecurity.length,
-      totalCertificateIssues: findings.hotspots.certificates.length,
-      totalFileIssues: findings.hotspots.files.length
-    };
-
-    res.json(findings);
-
-  } catch (error) {
-    console.error('Report error:', error.message);
-    if (error.response) {
-      console.error('Error response:', {
-        status: error.response.status,
-        data: error.response.data,
-        headers: error.response.headers
-      });
+    },
+    exposedComponents: extractExposedComponents(report),
+    networkSecurity: extractNetworkSecurityIssues(report),
+    certificates: extractCertificateIssues(report),
+    files: extractFileBasedIssues(report),
+    // Additional security metrics
+    securityScore: report.security_score || null,
+    trackerDetection: report.trackers || [],
+    malwareScore: report.virus_total?.malware_score || null,
+    securityMisconfiguration: {
+      debuggable: report.manifest_analysis?.debuggable === true,
+      allowBackup: report.manifest_analysis?.allowbackup === true,
+      adbEnabled: report.manifest_analysis?.adb_enabled === true
     }
-    
-    res.status(500).json({ 
-      error: 'Error fetching report from MobSF',
-      details: error.response?.data || error.message
-    });
-  }
-});
+  };
+}
 
 app.use((err, req, res, next) => {
   console.error('Global error:', err.message);
@@ -447,6 +404,13 @@ if (!fs.existsSync('uploads')) {
   fs.mkdirSync('uploads');
 }
 
-app.listen(port, () => {
+const server = app.listen(port, () => {
   console.log(`Server running on port ${port}`);
+}).on('error', (e) => {
+  if (e.code === 'EADDRINUSE') {
+    console.log(`Port ${port} is busy, trying ${port + 1}...`);
+    server.listen(port + 1);
+  } else {
+    console.error('Server error:', e);
+  }
 }); 
